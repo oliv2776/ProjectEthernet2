@@ -43,9 +43,7 @@
 #include "ip_addr.h"
 /* lwIP core includes */
 #include "lwip/opt.h"
-
 #include "lwip/init.h"
-
 #include "lwip/tcp.h"
 
 /* lwIP netif includes */
@@ -67,11 +65,70 @@ UART_HandleTypeDef huart3;
 
 /* USER CODE BEGIN PV */
 /* Private variables ---------------------------------------------------------*/
-#define IP1 192
-#define IP2 168
-#define IP3 1
-#define IP4 106
-#define PORT 23
+
+#define DEST_IP_ADDR0   192
+#define DEST_IP_ADDR1   168
+#define DEST_IP_ADDR2   0
+#define DEST_IP_ADDR3   11
+
+#define DEST_PORT       7
+
+u8_t  recev_buf[50];
+__IO uint32_t message_count=0;
+
+u8_t   data[100];
+
+__IO u8_t Tcp_flag = 0;
+struct tcp_pcb *echoclient_pcb;
+/* ECHO protocol states */
+
+enum echoclient_states
+{
+  ES_NOT_CONNECTED = 0,
+  ES_CONNECTED,
+  ES_RECEIVED,
+  ES_CLOSING,
+};
+struct echoclient
+{
+  enum echoclient_states state; /* connection status */
+  struct tcp_pcb *pcb;          /* pointer on the current tcp_pcb */
+  struct pbuf *p_tx;            /* pointer on pbuf to be transmitted */
+};
+
+
+
+/**/
+#define BOARDNAME 1
+#define ADC_1 1
+#define ADC_2 2
+#define ADC_3 3
+#define ADC_1_2 4
+#define ADC_1_3 5
+#define ADC_2_3 6
+#define ADC_1_2_3 7
+#define SIZEDATA 1024
+#define SIZEFRAME 2*SIZEDATA+24
+
+union frame_u {
+	struct frame_s {
+		uint8_t board;
+		uint8_t adc_number;
+		uint32_t packet_number;
+		uint32_t total_of_packet;
+		uint8_t day;
+		uint8_t month;
+		uint16_t year;
+		uint8_t hour;
+		uint8_t minutes;
+		uint8_t seconds;
+		uint8_t miliseconds;
+		uint32_t data_lenght;
+		uint16_t data[SIZEDATA];
+	}frame_as_field;
+	char frame_as_byte[SIZEFRAME];
+};
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -91,13 +148,14 @@ static void MX_USART3_UART_Init(void);
 /* USER CODE END PFP */
 
 /* USER CODE BEGIN 0 */
-static err_t client_sent(void *arg, struct tcp_pcb *pcb, u16_t len);
-static err_t client_connected(void *arg, struct tcp_pcb *pcb, err_t err);
-void my_client_init(void);
-static void client_close(struct tcp_pcb *pcb);
-static err_t client_connected(void *arg, struct tcp_pcb *pcb, err_t err);
-static err_t client_sent(void *arg, struct tcp_pcb *pcb, u16_t len);
-
+void tcp_echoclient_connect(void);
+static err_t tcp_echoclient_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err);
+static void tcp_echoclient_connection_close(struct tcp_pcb *tpcb, struct echoclient * es);
+static err_t tcp_echoclient_poll(void *arg, struct tcp_pcb *tpcb);
+static err_t tcp_echoclient_sent(void *arg, struct tcp_pcb *tpcb, u16_t len);
+static void tcp_echoclient_send(struct tcp_pcb *tpcb, struct echoclient * es);
+static err_t tcp_echoclient_connected(void *arg, struct tcp_pcb *tpcb, err_t err);
+union frame_u formatbuffer(uint8_t boardNumber, uint8_t adcnumber, uint32_t nbPacket, uint32_t numberTotalOfPackets);
 /* USER CODE END 0 */
 
 int main(void)
@@ -126,16 +184,20 @@ int main(void)
 
   /* USER CODE BEGIN 2 */
 
+tcp_echoclient_connect();
   /* USER CODE END 2 */
 
   /* Infinite loop */
-  /* USER CODE BEGIN WHILE */
+  /* USER CODE BEGIN WHILE */	
   while (1)
   {
   /* USER CODE END WHILE */
 
   /* USER CODE BEGIN 3 */
 
+		
+		
+		
   }
   /* USER CODE END 3 */
 
@@ -510,63 +572,267 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
-
-static err_t client_sent(void *arg, struct tcp_pcb *pcb, u16_t len);
-static err_t client_connected(void *arg, struct tcp_pcb *pcb, err_t err);
-
-
-
-void my_client_init(void)
+/**
+  * @brief  Connects to the TCP echo server
+  * @param  None
+  * @retval None
+  */
+void tcp_echoclient_connect(void)
 {
-  struct tcp_pcb *pcb;
-  const struct ip_addr_t dest;
-  err_t ret_val;
-  //IP4_ADDR(&dest, IP1, IP2, IP3, IP4);
-
-  pcb = tcp_new();
-  tcp_bind(pcb, IP_ADDR_ANY, 7000); //client port for outcoming connection
-  tcp_arg(pcb, NULL);
-	ret_val = tcp_connect(pcb, (const struct ip_addr_t *)&dest, 8000, client_connected); //server port for incoming connection
-  if (ret_val != ERR_OK)
-		printf("\tcp_connect(): Errors on return value, returned value is %d\n", ret_val);
+  ip_addr_t DestIPaddr;
+  if (Tcp_flag)return;
+  /* create new tcp pcb */
+  echoclient_pcb = tcp_new();
+       
+  if (echoclient_pcb != NULL) {
+    Tcp_flag = 1;
+    IP4_ADDR( &DestIPaddr, DEST_IP_ADDR0, DEST_IP_ADDR1, DEST_IP_ADDR2, DEST_IP_ADDR3 );
+       
+    /* connect to destination address/port */
+    tcp_connect(echoclient_pcb,&DestIPaddr,DEST_PORT,tcp_echoclient_connected);
+  }
 }
 
-static void client_close(struct tcp_pcb *pcb)
+/**
+  * @brief Function called when TCP connection established
+  * @param tpcb: pointer on the connection contol block
+  * @param err: when connection correctly established err should be ERR_OK 
+  * @retval err_t: returned error 
+  */
+static err_t tcp_echoclient_connected(void *arg, struct tcp_pcb *tpcb, err_t err)
 {
-   tcp_arg(pcb, NULL);
-   tcp_sent(pcb, NULL);
-   tcp_close(pcb);
+  struct echoclient *es = NULL;
+  
+  if (err == ERR_OK) {
+    /* allocate structure es to maintain tcp connection informations */
+    es = (struct echoclient *)mem_malloc(sizeof(struct echoclient));
+  
+    if (es != NULL) {
+      es->state = ES_CONNECTED;
+      es->pcb = tpcb;
+      
+      sprintf((char*)data, "sending tcp client message %d", message_count);
+        
+      /* allocate pbuf */
+      es->p_tx = pbuf_alloc(PBUF_TRANSPORT, strlen((char*)data) , PBUF_POOL);
+         
+      if (es->p_tx) {       
+        /* copy data to pbuf */
+        pbuf_take(es->p_tx, (char*)data, strlen((char*)data));
+        
+        /* pass newly allocated es structure as argument to tpcb */
+        tcp_arg(tpcb, es);
+  
+        /* initialize LwIP tcp_recv callback function */ 
+        tcp_recv(tpcb, tcp_echoclient_recv);
+  
+        /* initialize LwIP tcp_sent callback function */
+        tcp_sent(tpcb, tcp_echoclient_sent);
+  
+        /* initialize LwIP tcp_poll callback function */
+        tcp_poll(tpcb, tcp_echoclient_poll, 1);
+    
+        /* send data */
+        tcp_echoclient_send(tpcb,es);
+        
+        return ERR_OK;
+      }
+    } else {
+      /* close connection */
+      tcp_echoclient_connection_close(tpcb, es);
+      
+      /* return memory allocation error */
+      return ERR_MEM;  
+    }
+  } else {
+    /* close connection */
+    tcp_echoclient_connection_close(tpcb, es);
+  }
+  return err;
+}
+    
+/**
+  * @brief tcp_receiv callback
+  * @param arg: argument to be passed to receive callback 
+  * @param tpcb: tcp connection control block 
+  * @param err: receive error code 
+  * @retval err_t: retuned error  
+  */
+static err_t tcp_echoclient_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err)
+{ 
+  struct echoclient *es;
+  err_t ret_err;
+  
 
-   printf("\nclient_close(): Closing...\n");
+  LWIP_ASSERT("arg != NULL",arg != NULL);
+  
+  es = (struct echoclient *)arg;
+  Tcp_flag = 0;
+  /* if we receive an empty tcp frame from server => close connection */
+  if (p == NULL) {
+    /* remote host closed connection */
+    es->state = ES_CLOSING;
+    if (es->p_tx == NULL) {
+       /* we're done sending, close connection */
+       tcp_echoclient_connection_close(tpcb, es);
+    } else {    
+      /* send remaining data*/
+      tcp_echoclient_send(tpcb, es);
+    }
+    ret_err = ERR_OK;
+  }   
+  /* else : a non empty frame was received from echo server but for some reason err != ERR_OK */
+  else if (err != ERR_OK) {
+    /* free received pbuf*/
+    if (p != NULL) {
+      pbuf_free(p);
+    }
+    ret_err = err;
+  } else if(es->state == ES_CONNECTED) {
+    /* increment message count */
+    message_count++;     
+    /* Acknowledge data reception */
+    tcp_recved(tpcb, p->tot_len);  
+    
+    pbuf_free(p);
+    tcp_echoclient_connection_close(tpcb, es);
+    ret_err = ERR_OK;
+  }
+
+  /* data received when connection already closed */
+  else {
+    /* Acknowledge data reception */
+    tcp_recved(tpcb, p->tot_len);
+    
+    /* free pbuf and do nothing */
+    pbuf_free(p);
+    ret_err = ERR_OK;
+  }
+  return ret_err;
 }
 
-static err_t client_connected(void *arg, struct tcp_pcb *pcb, err_t err)
+/**
+  * @brief function used to send data
+  * @param  tpcb: tcp control block
+  * @param  es: pointer on structure of type echoclient containing info on data 
+  *             to be sent
+  * @retval None 
+  */
+static void tcp_echoclient_send(struct tcp_pcb *tpcb, struct echoclient * es)
 {
-   char *string = "Hello!";
-   LWIP_UNUSED_ARG(arg);
+  struct pbuf *ptr;
+  err_t wr_err = ERR_OK;
+ 
+  while ((wr_err == ERR_OK) &&
+         (es->p_tx != NULL) && 
+         (es->p_tx->len <= tcp_sndbuf(tpcb)))
+  {
+    
+    /* get pointer on pbuf from es structure */
+    ptr = es->p_tx;
 
-   if (err != ERR_OK)
-			 printf("\nclient_connected(): err argument not set to ERR_OK, but is value is %d\n", err);
-
-   else
-   {
-       tcp_sent(pcb, client_sent);
-       tcp_write(pcb, string, sizeof(string), 0);
+    /* enqueue data for transmission */
+    wr_err = tcp_write(tpcb, ptr->payload, ptr->len, 1);
+    
+    if (wr_err == ERR_OK) { 
+      /* continue with next pbuf in chain (if any) */
+      es->p_tx = ptr->next;
+      
+      if (es->p_tx != NULL) {
+        /* increment reference count for es->p */
+        pbuf_ref(es->p_tx);
+      }
+      
+      /* free pbuf: will free pbufs up to es->p (because es->p has a reference count > 0) */
+      pbuf_free(ptr);
+   } else if(wr_err == ERR_MEM) {
+      /* we are low on memory, try later, defer to poll */
+     es->p_tx = ptr;
+   } else {
+     /* other problem ?? */
    }
-
-   return err;
+  }
 }
 
-static err_t client_sent(void *arg, struct tcp_pcb *pcb, u16_t len)
+/**
+  * @brief  This function implements the tcp_poll callback function
+  * @param  arg: pointer on argument passed to callback
+  * @param  tpcb: tcp connection control block
+  * @retval err_t: error code
+  */
+static err_t tcp_echoclient_poll(void *arg, struct tcp_pcb *tpcb)
 {
-   LWIP_UNUSED_ARG(arg);
+  err_t ret_err;
+  struct echoclient *es;
 
-   printf("\nclient_sent(): Number of bytes ACK'ed is %d", len);
-
-   client_close(pcb);
-
-   return ERR_OK;
+  es = (struct echoclient*)arg;
+  if (es != NULL) {
+    if (es->p_tx != NULL) {
+      /* there is a remaining pbuf (chain) , try to send data */
+      tcp_echoclient_send(tpcb, es);
+    } else {
+      /* no remaining pbuf (chain)  */
+      if (es->state == ES_CLOSING) {
+        /* close tcp connection */
+        tcp_echoclient_connection_close(tpcb, es);
+      }
+    }
+    ret_err = ERR_OK;
+  } else {
+    /* nothing to be done */
+    tcp_abort(tpcb);
+    ret_err = ERR_ABRT;
+  }
+  return ret_err;
 }
+
+/**
+  * @brief  This function implements the tcp_sent LwIP callback (called when ACK
+  *         is received from remote host for sent data) 
+  * @param  arg: pointer on argument passed to callback
+  * @param  tcp_pcb: tcp connection control block
+  * @param  len: length of data sent 
+  * @retval err_t: returned error code
+  */
+static err_t tcp_echoclient_sent(void *arg, struct tcp_pcb *tpcb, u16_t len)
+{
+  struct echoclient *es;
+
+  LWIP_UNUSED_ARG(len);
+
+  es = (struct echoclient *)arg;
+  
+  if(es->p_tx != NULL)
+  {
+    /* still got pbufs to send */
+    tcp_echoclient_send(tpcb, es);
+  }
+
+  return ERR_OK;
+}
+
+/**
+  * @brief This function is used to close the tcp connection with server
+  * @param tpcb: tcp connection control block
+  * @param es: pointer on echoclient structure
+  * @retval None
+  */
+static void tcp_echoclient_connection_close(struct tcp_pcb *tpcb, struct echoclient * es )
+{
+  /* remove callbacks */
+  tcp_recv(tpcb, NULL);
+  tcp_sent(tpcb, NULL);
+  tcp_poll(tpcb, NULL,0);
+
+  if (es != NULL) {
+    mem_free(es);
+  }
+
+  /* close tcp connection */
+  tcp_close(tpcb);
+  
+}
+
 /* USER CODE END 4 */
 
 /**
