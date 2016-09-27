@@ -41,6 +41,8 @@
 #include <time.h>
 #include <string.h>
 #include "ip_addr.h"
+#include <time.h>
+
 /* lwIP core includes */
 #include "lwip/opt.h"
 #include "lwip/init.h"
@@ -129,6 +131,27 @@ union frame_u {
 	char frame_as_byte[SIZEFRAME];
 };
 
+	struct DMA_Variables
+	{
+
+		uint32_t bufferA[SIZEDATA]; /*!< first buffer */
+		uint32_t bufferB[SIZEDATA]; /*!< second buffer */
+
+		uint32_t stateA; /*!< status of buffer A, 0 = empty ; 1 = being used ; 2 = full */
+		uint32_t stateB; /*!< status of buffer B, 0 = empty ; 1 = being used ; 2 = full */
+
+		uint8_t *error; /*!< DMA errors */
+
+		uint32_t buffer_switch;
+		
+		uint32_t switchADC;
+
+	};
+	struct DMA_Variables dma1, dma2, dma3;
+	
+	uint32_t error;
+	
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -148,6 +171,8 @@ static void MX_USART3_UART_Init(void);
 /* USER CODE END PFP */
 
 /* USER CODE BEGIN 0 */
+
+/*Functions for tcp client*/
 void tcp_echoclient_connect(void);
 static err_t tcp_echoclient_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err);
 static void tcp_echoclient_connection_close(struct tcp_pcb *tpcb, struct echoclient * es);
@@ -155,7 +180,14 @@ static err_t tcp_echoclient_poll(void *arg, struct tcp_pcb *tpcb);
 static err_t tcp_echoclient_sent(void *arg, struct tcp_pcb *tpcb, u16_t len);
 static void tcp_echoclient_send(struct tcp_pcb *tpcb, struct echoclient * es);
 static err_t tcp_echoclient_connected(void *arg, struct tcp_pcb *tpcb, err_t err);
+//fuction used to format the frame but the date can't be set -> will be set in the server programm
 union frame_u formatbuffer(uint8_t boardNumber, uint8_t adcnumber, uint32_t nbPacket, uint32_t numberTotalOfPackets);
+
+/*Functions for the ADCs and the recordings*/
+	void send_data(uint32_t adc_values);
+	uint8_t *record_adc1(uint32_t buffer_switch);
+	uint8_t *record_adc2(uint32_t buffer_switch);
+	uint8_t *record_adc3(uint32_t buffer_switch);
 /* USER CODE END 0 */
 
 int main(void)
@@ -183,8 +215,15 @@ int main(void)
   MX_LWIP_Init();
 
   /* USER CODE BEGIN 2 */
+	// Initialize DMA buffer switches to 1 to start at the first buffer when the program starts
+		dma1.buffer_switch = 1;
+		dma2.buffer_switch = 1;
+		dma3.buffer_switch = 1;
+		dma1.switchADC = 1;
+		dma2.switchADC = 1;
+		dma3.switchADC = 1;
 
-tcp_echoclient_connect();
+	tcp_echoclient_connect();
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -572,6 +611,12 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
+/*
+**TCP functions
+**
+**
+*/
+
 /**
   * @brief  Connects to the TCP echo server
   * @param  None
@@ -832,6 +877,176 @@ static void tcp_echoclient_connection_close(struct tcp_pcb *tpcb, struct echocli
   tcp_close(tpcb);
   
 }
+
+union frame_u formatbuffer(uint8_t boardNumber, uint8_t adcnumber, uint32_t nbPacket, uint32_t numberTotalOfPackets) {
+	//SYSTEMTIME t;
+	//GetSystemTime(&t);
+
+	union frame_u frame;
+
+	frame.frame_as_field.board = boardNumber;
+	frame.frame_as_field.adc_number = adcnumber;
+	frame.frame_as_field.packet_number = nbPacket;
+	frame.frame_as_field.total_of_packet = numberTotalOfPackets;
+	//frame.frame_as_field.day = t.wDay;
+	frame.frame_as_field.month = 13;//t.wMonth;
+	//frame.frame_as_field.year = t.wYear;
+	//frame.frame_as_field.hour = t.wHour;
+	//frame.frame_as_field.minutes = t.wMinute;
+	//frame.frame_as_field.seconds = t.wSecond;
+	//frame.frame_as_field.miliseconds = t.wMilliseconds;
+	frame.frame_as_field.data_lenght = SIZEDATA;
+
+	return frame;
+}
+
+
+/*
+**Recording functions
+**
+**
+*/
+
+	void send_data(uint32_t adc_values)
+	{
+	//code to send
+
+	//clear the array
+	}
+
+	//recording functions of the ADCs
+	/**
+	 * @brief record ADC1 signals in the buffers
+	 * @param uint_32 the number of the current switch
+	 * @retval uint_32 return the error code: 0= no errors; 1= wrong switch number
+	 */
+	uint8_t *record_adc1(uint32_t buffer_switch)
+	{
+
+	// -- Enables ADC1 and starts conversion of the regular channels.
+		if (HAL_ADC_Start(&hadc1) != HAL_OK)
+			return 0;
+
+		switch (buffer_switch)
+		{
+
+		case 1:
+			if (HAL_ADC_Start_DMA(&hadc1, (uint32_t*) dma1.bufferA,
+			SIZEDATA * 2) != HAL_OK)
+				return 0;
+			dma1.buffer_switch = 2;
+			HAL_GPIO_WritePin(GPIOD, GPIO_PIN_12, GPIO_PIN_SET);
+			HAL_GPIO_WritePin(GPIOD, GPIO_PIN_13, GPIO_PIN_RESET);
+			//send_data(dma1.bufferB);
+			dma1.error = 0;
+			break;
+
+		case 2:
+			if (HAL_ADC_Start_DMA(&hadc1, (uint32_t*) dma1.bufferB,
+			SIZEDATA * 2) != HAL_OK)
+				return 0;
+			HAL_GPIO_WritePin(GPIOD, GPIO_PIN_12, GPIO_PIN_RESET);
+			HAL_GPIO_WritePin(GPIOD, GPIO_PIN_13, GPIO_PIN_SET);
+			dma1.buffer_switch = 1;
+
+			//send_data(dma1.bufferA);
+			dma1.error = 0;
+			break;
+
+		default:
+			dma1.error = "1";
+			break;
+
+		}
+
+		return dma1.error;
+
+	}
+
+	/**
+	 * @brief record ADC2 signals in the buffers
+	 * @param uint_32 the number of the current switch
+	 * @retval uint_32 return the error code: 0= no errors; 1= wrong switch number
+	 */
+	uint8_t *record_adc2(uint32_t buffer_switch)
+	{
+
+	// -- Enables ADC1 and starts conversion of the regular channels.
+		if (HAL_ADC_Start(&hadc2) != HAL_OK)
+			return 0;
+
+		switch (buffer_switch)
+		{
+
+		case 1:
+			if (HAL_ADC_Start_DMA(&hadc2, (uint32_t*) dma2.bufferA,
+			SIZEDATA * 2) != HAL_OK)
+				return 0;
+			dma2.buffer_switch = 2;
+			//send_data(dma2.bufferB);
+			break;
+
+		case 2:
+			if (HAL_ADC_Start_DMA(&hadc2, (uint32_t*) dma2.bufferB,
+			SIZEDATA * 2) != HAL_OK)
+				return 0;
+			dma2.buffer_switch = 1;
+			//send_data(dma2.bufferA);
+			break;
+
+		default:
+			dma2.error = "1";
+			break;
+
+		}
+
+		return dma2.error;
+
+	}
+
+	/**
+	 * @brief record ADC3 signals in the buffers
+	 * @param uint_32 the number of the current switch
+	 * @retval uint_32 return the error code: 0= no errors; 1= wrong switch number
+	 */
+	uint8_t *record_adc3(uint32_t buffer_switch)
+	{
+
+	// -- Enables ADC1 and starts conversion of the regular channels.
+		if (HAL_ADC_Start(&hadc3) != HAL_OK)
+			return 0;
+
+		switch (buffer_switch)
+		{
+
+		case 1:
+			if (HAL_ADC_Start_DMA(&hadc3, (uint32_t*) dma3.bufferA,
+			SIZEDATA * 2) != HAL_OK)
+				return 0;
+			dma3.buffer_switch = 2;
+			//send_data(dma3.bufferB);
+
+			break;
+
+		case 2:
+			if (HAL_ADC_Start_DMA(&hadc3, (uint32_t*) dma3.bufferB,
+			SIZEDATA * 2) != HAL_OK)
+				return 0;
+			dma3.buffer_switch = 1;
+			//send_data(dma3.bufferA);
+
+			break;
+
+		default:
+			dma3.error = "1";
+			break;
+
+		}
+
+		return dma3.error;
+
+	}
+
 
 /* USER CODE END 4 */
 
